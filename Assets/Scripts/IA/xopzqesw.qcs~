@@ -1,0 +1,312 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.AI;
+using UnityEngine.UI;
+
+[RequireComponent (typeof(HealthSystem))]
+public class DroneAI : MonoBehaviour
+{
+    private enum States
+    {
+        IDLE =0,
+        PATROL,
+        ALERT,
+        CHASE,
+        ATTACK,
+        HIT,
+        DIE
+    }
+    FSM<States> m_brain;
+    
+    public float m_MinDistanceToAlert = 5.0f;
+    public float m_MinDistanceToAttack = 3.0f;
+    public float m_MaxDistanceToAttack = 7.0f;
+    public float m_MaxDistanceToPatrol = 15.0f;
+    public float m_ConeAngle = 60.0f;
+    public float m_RootSpeed = 10f;
+    public LayerMask m_CollisionLayerMask;
+    public List<Transform> m_PatrolWaypoints;
+    public GameObject m_particles;
+    NavMeshAgent m_NavMeshAgent;
+    int m_CurrentWaypointId = 0;
+    float m_DistanceToPlayer;//Al usarlo en diferentes funciones pasamos ha ahcerla miembro
+    States m_PreviouState;
+    public GameObject m_BulletPrefab;
+    public float m_Candence = 0.75f;
+    float m_CurrentCandence = 0.75f;
+    public Transform m_UIAnchor;
+    LifeBarEnemies m_LifeBar;
+    HealthSystem m_hp;
+    public RectTransform m_HUDRectTransform;
+    public HealthBarEnemie m_DroneLife;
+    // Start is called before the first frame update
+    void Start()
+    {
+        CreateLifeBar();
+        m_NavMeshAgent = GetComponent<NavMeshAgent>();
+        m_hp = GetComponent<HealthSystem>();
+        Init();
+    }
+
+    // Update is called once per frame
+    void Update()
+    {
+        m_DistanceToPlayer = Vector3.Distance(GameController.GetGameController().GetPlayer().transform.position, transform.position);
+        m_brain.Update();
+    }
+    private void LateUpdate()
+    {
+        m_LifeBar.SetLifeBarEnemy(m_UIAnchor.position);
+    }
+    void CreateLifeBar()
+    {
+        HealthBarEnemie l_HealthBar = GameObject.Instantiate(m_DroneLife.gameObject, m_HUDRectTransform.transform).GetComponent<HealthBarEnemie>();
+
+        /*GameObject l_gObject = new GameObject("LifeBarDrone");
+        l_gObject.transform.SetParent(GameObject.FindWithTag("HudEnemies").transform);
+ */
+        m_LifeBar = l_HealthBar.gameObject.GetComponent<LifeBarEnemies>();
+        //HealthBarEnemie l_HealthBar = l_gObject.AddComponent<HealthBarEnemie>();
+        l_HealthBar.m_hp = m_hp;
+        l_HealthBar.gameObject.SetActive(true);
+        //l_gObject.AddComponent<Slider>();
+        /*RectTransform l_rect = l_gObject.AddComponent<RectTransform>();
+        l_rect.anchorMin = new Vector2(0,1);
+        l_rect.anchorMax = new Vector2(0,1);
+        l_rect.pivot = new Vector2(0.5f, 0.5f);*/
+    }
+    void Init()
+    {   
+        m_brain = new FSM<States>(States.IDLE);
+        //OnEnter
+
+        m_brain.SetOnEnter(States.IDLE, () => {
+            Debug.Log("ENTRO");
+            m_brain.ChangeState(States.PATROL);
+        });
+        m_brain.SetOnEnter(States.PATROL, () => {
+            m_NavMeshAgent.isStopped = false;
+
+        });
+        m_brain.SetOnEnter(States.ALERT, () => {
+
+        });
+        m_brain.SetOnEnter(States.CHASE, () => {
+            
+        });
+        m_brain.SetOnEnter(States.ATTACK, () => {
+            m_CurrentCandence = 0;
+        });
+        m_brain.SetOnEnter(States.DIE, () => {
+
+        });
+        m_brain.SetOnEnter(States.HIT, () => {
+
+        });
+
+        //OnStay
+        m_brain.SetOnStay(States.IDLE, () => {
+            m_brain.ChangeState(States.PATROL);
+        });
+        m_brain.SetOnStay(States.PATROL, () => {
+           
+            if (!m_NavMeshAgent.hasPath && m_NavMeshAgent.pathStatus == NavMeshPathStatus.PathComplete)
+            {
+                MoveToNextPatrolPosition();
+                if (HearsPlayer())
+                {
+                    Debug.Log("Hears");
+                    m_brain.ChangeState(States.ALERT);
+                }
+            }
+            
+        });   
+        m_brain.SetOnStay(States.ALERT, () => {
+            if (SeesPlayer() )
+            {
+                if( m_MaxDistanceToAttack < m_DistanceToPlayer)
+                {
+                    m_brain.ChangeState(States.ATTACK);
+                }
+                else 
+                {
+                    m_brain.ChangeState(States.CHASE);
+                }
+            }
+            else
+            {
+//                transform.Rotate(0, 1, 0, Space.Self);
+                transform.localRotation = Quaternion.Euler(transform.localRotation.eulerAngles.x, transform.localRotation.eulerAngles.y + Time.deltaTime * m_RootSpeed, transform.localRotation.eulerAngles.z);
+                Debug.Log("AlertRot" + transform.localRotation.eulerAngles.y);
+                if (transform.localRotation.eulerAngles.y > 350)//Revisar
+                {
+                    
+                    m_brain.ChangeState(States.PATROL);
+                }
+            }
+              
+        });   
+        m_brain.SetOnStay(States.CHASE, () => {
+            Debug.Log("Chase");
+            Debug.Log(m_DistanceToPlayer);
+            if (m_DistanceToPlayer < m_MaxDistanceToPatrol)
+            {
+                if(m_DistanceToPlayer> m_MinDistanceToAttack && m_DistanceToPlayer < m_MaxDistanceToAttack)
+                {
+                    m_brain.ChangeState(States.ATTACK);
+                }
+                else
+                {
+                    ChaseMovement();
+                }
+            }
+            else
+            {
+                m_brain.ChangeState(States.PATROL);   
+            }
+        });  
+        m_brain.SetOnStay(States.ATTACK, () => {
+            Debug.Log("attack");
+            
+            transform.LookAt(GameController.GetGameController().GetPlayer().transform);
+            m_CurrentCandence -= Time.deltaTime;
+            if (m_CurrentCandence <= 0)
+            {
+                m_particles.SetActive(true);
+                Shoot();
+                m_CurrentCandence = m_Candence;
+            }
+            else
+            {
+                m_particles.SetActive(false);
+            }
+            
+            if (m_DistanceToPlayer > m_MaxDistanceToPatrol)
+            {
+                m_brain.ChangeState(States.CHASE);
+            }
+        });  
+        m_brain.SetOnStay(States.DIE, () => {
+             
+        });  
+        m_brain.SetOnStay(States.HIT, () => {
+            if(m_PreviouState == States.IDLE || m_PreviouState == States.PATROL)
+            {
+                m_brain.ChangeState(States.ALERT);
+            }
+            else
+            {
+                m_brain.ChangeState(m_PreviouState);
+            }
+
+        });
+        //OnExit
+        m_brain.SetOnExit(States.IDLE, () => {
+            m_PreviouState = States.IDLE;
+        });
+        m_brain.SetOnExit(States.PATROL, () => {
+            m_PreviouState = States.PATROL;
+            m_NavMeshAgent.isStopped = true;
+
+
+        });
+        m_brain.SetOnExit(States.ALERT, () => {
+            m_PreviouState = States.ALERT;
+        });
+        m_brain.SetOnExit(States.CHASE, () => {
+            m_CurrentWaypointId = PatrolPositionNear();
+            m_PreviouState = States.CHASE;
+        });
+        m_brain.SetOnExit(States.ATTACK, () => {
+            m_PreviouState = States.ATTACK;
+            m_particles.SetActive(false);
+        });
+        m_brain.SetOnExit(States.DIE, () => {
+            m_PreviouState = States.DIE;
+        });
+        m_brain.SetOnExit(States.HIT, () => {
+            m_PreviouState = States.HIT;
+
+        });
+
+    }
+
+
+    void MoveToNextPatrolPosition()
+    {
+        m_NavMeshAgent.destination = m_PatrolWaypoints[m_CurrentWaypointId].position;
+        m_NavMeshAgent.isStopped = false;
+        ++m_CurrentWaypointId;
+        if (m_CurrentWaypointId >= m_PatrolWaypoints.Count)
+        {
+            m_CurrentWaypointId = 0;
+        }
+    }
+    int PatrolPositionNear()
+    {
+        Vector3 l_previus = Vector3.zero;
+        int l_nearPosition = 0;
+        for (int i = 0; i < m_PatrolWaypoints.Count; i++)
+        {
+            if(Vector3.Distance(transform.position, m_PatrolWaypoints[i].position) 
+                < Vector3.Distance(transform.position, l_previus))
+            {
+                l_nearPosition = i;
+            }
+            l_previus = m_PatrolWaypoints[i].position;
+        }
+        return l_nearPosition;
+    }
+    void ChaseMovement()
+    {
+        m_NavMeshAgent.destination = GameController.GetGameController().GetPlayer().transform.position;
+        m_NavMeshAgent.isStopped = false;
+    }
+
+    bool HearsPlayer()
+    {
+        if(m_DistanceToPlayer < m_MinDistanceToAlert)
+        {
+            Debug.Log("Hear player");
+            return true;
+        }
+        else 
+        { 
+            return false;
+        }
+        
+    }
+    bool SeesPlayer()
+    {
+        Vector3 l_PlayerPosition = GameController.GetGameController().GetPlayer().transform.position;
+         Vector3 l_EyesDronePosition = transform.position + Vector3.up * 1.6f;
+         Vector3 l_Direction = l_PlayerPosition - l_EyesDronePosition;
+         float l_DistanceToPlayer = l_Direction.magnitude;
+         l_Direction.Normalize();
+         Ray l_Ray = new Ray(l_EyesDronePosition, l_Direction);
+         if(l_DistanceToPlayer< m_MaxDistanceToPatrol && Vector3.Dot(transform.forward, l_Direction) >= Mathf.Cos(m_ConeAngle*0.5f*Mathf.Deg2Rad))
+         {
+             if (!Physics.Raycast(l_Ray, l_DistanceToPlayer, m_CollisionLayerMask.value))
+             {
+                 return true;
+             }
+
+         }
+        return false;
+    }
+    void Shoot()
+    {
+        Vector3 l_BulletDir = GameController.GetGameController().GetPlayer().transform.position - transform.position;
+        l_BulletDir /= l_BulletDir.magnitude;
+        var l_bullet = m_BulletPrefab.GetComponent<Bullet>();
+        l_bullet.m_dir = l_BulletDir;
+        l_bullet.transform.position = transform.position + new Vector3(0, 1.39f, 0);
+        l_bullet.m_BulletDebug = true;
+        Instantiate(m_BulletPrefab);
+    }
+    public void SetStateToHit()
+    {
+        m_brain.ChangeState(States.HIT);
+    }
+}
